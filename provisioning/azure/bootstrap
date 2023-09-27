@@ -1,0 +1,82 @@
+#!/bin/bash
+set -e
+
+# This bootstrap finished within 15min 47.950s in 642ms (firmware) + 1.199s (loader) + 1.338s (kernel) + 15min 44.769s (userspace) = 15min 47.950s.
+
+PREFIX=$(date "+%Y%m%d%H%M%S")
+RESOURCE_GROUP_NAME=$PREFIX-privateisu
+VM_NAME=$PREFIX-vm
+NSG_NAME=$PREFIX-vmNSG
+VM_IMAGE=Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest # Ubuntu Server 22.04 LTS ref https://github.com/Azure/azure-cli/issues/13320#issuecomment-713068535 https://ubuntu.com/server/docs/find-ubuntu-images-on-azure
+VM_SIZE=Standard_D4s_v4 # 4vCPU 16GiB $181.04/月 c6i.xlarge 4vCPU 8GiB https://github.com/catatsuy/private-isu/blob/1ed949d2bd8a955e232e497bf7733bd2eb070674/README.md#L93
+VM_DATA_DISK_SIZE=16 # https://learn.microsoft.com/ja-jp/azure/virtual-machines/linux/tutorial-manage-disks#attach-disk-at-vm-creation https://github.com/matsuu/cloud-init-isucon/blob/20638b3e93b0adf6daedcdef5152c1d8b690936b/private-isu/README.md#L10
+LOCATION=japaneast
+
+while getopts s:g: OPT; do
+    case $OPT in
+    "s")
+        FLG_S="TRUE"
+        SUBSCRIPTION_ID="$OPTARG"
+        ;;
+    *)
+        echo -e "Usage: provisioning/azure/bootstrap -s SUBSCRIPTION_ID" 1>&2
+        exit 1
+        ;;
+    esac
+done
+
+if [ "$FLG_S" != "TRUE" ]; then
+        echo -e "Usage: provisioning/azure/bootstrap -s SUBSCRIPTION_ID" 1>&2
+        exit 1
+fi
+
+echo "az login"
+az login
+
+echo "az account set --subscription $SUBSCRIPTION_ID"
+az account set --subscription $SUBSCRIPTION_ID
+
+echo "az group create --location $LOCATION --resource-group $RESOURCE_GROUP_NAME"
+az group create \
+  --location $LOCATION \
+  --resource-group $RESOURCE_GROUP_NAME
+
+echo "az vm create --resource-group $RESOURCE_GROUP_NAME --location $LOCATION --name $VM_NAME --image $VM_IMAGE --size $VM_SIZE --data-disk-sizes-gb $VM_DATA_DISK_SIZE --accelerated-networking --custom-data provisioning/azure/cloud-init.cfg --generate-ssh-keys"
+az vm create \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --location $LOCATION \
+  --name $VM_NAME \
+  --image $VM_IMAGE \
+  --size $VM_SIZE \
+  --data-disk-sizes-gb $VM_DATA_DISK_SIZE \
+  --accelerated-networking \
+  --custom-data provisioning/azure/cloud-init.cfg \
+  --generate-ssh-keys
+
+# Allow 80, 443 https://learn.microsoft.com/ja-jp/azure/virtual-network/tutorial-filter-network-traffic-cli
+echo "az network nsg rule create --resource-group $RESOURCE_GROUP_NAME --nsg-name $NSG_NAME --name Allow-Web-All --access Allow --protocol Tcp --direction Inbound --priority 100 --source-address-prefix Internet --source-port-range "*" --destination-port-range 80 443"
+az network nsg rule create \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --nsg-name $NSG_NAME \
+  --name Allow-Web-All \
+  --access Allow \
+  --protocol Tcp \
+  --direction Inbound \
+  --priority 100 \
+  --source-address-prefix Internet \
+  --source-port-range "*" \
+  --destination-port-range 80 443
+
+echo ""
+echo "Complated!"
+echo ""
+echo "----------------------------------------------------------------"
+echo "# How to login to VM"
+echo ""
+echo "ssh -i ~/.ssh/id_rsa $(whoami)@$(az vm show -n $VM_NAME -g $RESOURCE_GROUP_NAME --show-details -o json --query publicIps | jq -r .)"
+echo ""
+echo "open http://$(az vm show -n $VM_NAME -g $RESOURCE_GROUP_NAME --show-details -o json --query publicIps | jq -r .)/"
+echo ""
+echo "# How to clean up"
+echo "provisioning/azure/cleanup -g $RESOURCE_GROUP_NAME"
+echo ""
